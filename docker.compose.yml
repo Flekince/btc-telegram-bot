@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  btc-bot:
+    build: .
+    container_name: btc-telegram-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - TZ=America/Sao_Paulo
+    
+  redis:
+    image: redis:7-alpine
+    container_name: btc-bot-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    profiles:
+      - with-redis
+
+volumes:
+  redis-data:
