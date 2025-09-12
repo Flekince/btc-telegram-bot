@@ -36,3 +36,11 @@ Bot completo para monitoramento e alertas de Bitcoin no Telegram, com sistema de
 ```bash
 git clone https://github.com/Flekince/btc-telegram-bot.git
 cd btc-telegram-bot
+
+### 2. Configure as variáveis de ambiente:
+```bash
+# Copie o arquivo de exemplo
+cp .env.example .env
+
+# Edite o arquivo .env com seus dados reais
+notepad .env  # Windows
