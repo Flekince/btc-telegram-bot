@@ -3,7 +3,7 @@ Gerenciamento de banco de dados SQLite
 """
 import aiosqlite
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 import logging
 from pathlib import Path
@@ -243,22 +243,26 @@ class Database:
     
     # === Métodos de Cache ===
     
-    async def get_cache(self, key: str) -> Optional[str]:
+    async def get_cache(self, key: str, ttl_minutes: int = 5) -> Optional[str]:
         """Retorna valor do cache"""
         async with self.conn.cursor() as cursor:
-            await cursor.execute('''
+            await cursor.execute(f'''
                 SELECT value FROM market_cache 
                 WHERE key = ? AND 
-                datetime(updated_at) > datetime('now', '-5 minutes')
+                datetime(updated_at) > datetime('now', '-{ttl_minutes} minutes')
             ''', (key,))
             row = await cursor.fetchone()
             return row['value'] if row else None
     
     async def set_cache(self, key: str, value: str):
-        """Define valor no cache"""
+        """Define/atualiza valor no cache com timestamp atual"""
         async with self.conn.cursor() as cursor:
             await cursor.execute('''
                 INSERT OR REPLACE INTO market_cache (key, value, updated_at)
                 VALUES (?, ?, CURRENT_TIMESTAMP)
             ''', (key, value))
             await self.conn.commit()
+    
+    async def set_cache_with_ttl(self, key: str, value: str, ttl_seconds: int):
+        """Compatibilidade: seta cache e TTL é aplicado via parâmetro do get_cache."""
+        await self.set_cache(key, value)

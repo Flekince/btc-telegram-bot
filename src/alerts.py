@@ -206,13 +206,66 @@ Responda com `/ack {alert['id']}` quando ação tomada
             if rsi <= config.RSI_OVERSOLD or rsi >= config.RSI_OVERBOUGHT:
                 await self._send_rsi_alert(rsi, market_data)
             
-            # Verifica grandes liquidações
-            liquidations = market_data.get('liquidations', {})
-            if liquidations.get('total_24h', 0) >= config.LIQUIDATION_THRESHOLD:
-                await self._send_liquidation_alert(liquidations, market_data)
+            # REMOVIDO: Alertas de liquidação falsos
+            # Não temos dados reais de liquidação com APIs gratuitas
+            
+            # Opcional: Envia atualização periódica de preço (descomente se quiser)
+            # await self._send_periodic_price_update(market_data)
                 
         except Exception as e:
             logger.error(f"Erro ao verificar condições especiais: {e}")
+    
+    async def _send_periodic_price_update(self, market_data: Dict[str, Any]):
+        """Envia atualização periódica de preço (a cada 30 minutos)"""
+        try:
+            # Verifica se já foi enviado recentemente (30 minutos)
+            cached = await self.db.get_cache('periodic_price_update', ttl_minutes=30)
+            if cached:
+                return
+            
+            price_data = market_data['price']
+            
+            # Calcula P&L do usuário
+            user_value = config.USER_BTC_POSITION * price_data['usd']
+            user_cost = config.USER_BTC_POSITION * config.USER_AVG_PRICE
+            pnl = user_value - user_cost
+            pnl_percent = (pnl / user_cost) * 100
+            
+            # Determina emoji baseado na variação
+            if price_data['change_24h'] > 2:
+                emoji = "🚀"
+            elif price_data['change_24h'] > 0:
+                emoji = "📈"
+            elif price_data['change_24h'] > -2:
+                emoji = "📉"
+            else:
+                emoji = "🔻"
+            
+            message = f"""
+{emoji} *ATUALIZAÇÃO DE PREÇO*
+
+💰 BTC: {config.USD_FORMAT.format(price_data['usd'])}
+💵 BRL: {config.BRL_FORMAT.format(price_data['brl'])}
+📊 24h: {price_data['change_24h']:+.2f}%
+
+💼 *Sua posição:*
+• Valor: {config.USD_FORMAT.format(user_value)}
+• P&L: {pnl_percent:+.1f}%
+
+_Próxima atualização em 30 min_
+            """.strip()
+            
+            await self.bot.send_message(
+                chat_id=config.USER_CHAT_ID,
+                text=message,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            
+            # Marca como enviado (cache por 30 minutos)
+            await self.db.set_cache('periodic_price_update', '1')
+            
+        except Exception as e:
+            logger.error(f"Erro ao enviar atualização periódica: {e}")
     
     async def _send_breakeven_alert(self, price: float, diff: float, 
                                    market_data: Dict[str, Any]):
@@ -270,38 +323,15 @@ _Preço próximo ao seu ponto de equilíbrio!_
         
         await self.db.set_cache(f'rsi_alert_{int(rsi)}', '1')
     
-    async def _send_liquidation_alert(self, liquidations: Dict[str, float], 
-                                     market_data: Dict[str, Any]):
-        """Envia alerta de grandes liquidações"""
-        cached = await self.db.get_cache('liquidation_alert')
-        if cached:
-            return
-        
-        total = liquidations['total_24h'] / 1e6  # Em milhões
-        longs_pct = (liquidations['longs'] / liquidations['total_24h']) * 100
-        
-        message = f"""
-💥 *GRANDES LIQUIDAÇÕES DETECTADAS*
-
-💸 Total 24h: ${total:.1f}M
-📊 Distribuição: {longs_pct:.0f}% longs / {100-longs_pct:.0f}% shorts
-💰 Preço atual: {config.USD_FORMAT.format(market_data['price']['usd'])}
-
-⚠️ _Alta volatilidade esperada_
-        """.strip()
-        
-        await self.bot.send_message(
-            chat_id=config.USER_CHAT_ID,
-            text=message,
-            parse_mode=ParseMode.MARKDOWN
-        )
-        
-        await self.db.set_cache('liquidation_alert', '1')
-    
     async def _is_silent_hours(self, chat_id: str) -> bool:
         """Verifica se está em horário silencioso"""
         try:
             user_config = await self.db.get_user_config(chat_id)
+            
+            # Verifica se notificações estão desabilitadas
+            if not user_config.get('notifications_enabled', True):
+                logger.info("Notificações desabilitadas para o usuário")
+                return True
             
             tz = pytz.timezone(user_config['timezone'])
             now = datetime.now(tz)
@@ -310,11 +340,20 @@ _Preço próximo ao seu ponto de equilíbrio!_
             silent_start = user_config['silent_start']
             silent_end = user_config['silent_end']
             
+            logger.debug(f"Verificando horário silencioso: atual={current_hour}h, silent={silent_start}h-{silent_end}h")
+            
             # Lida com horários que cruzam meia-noite
             if silent_start > silent_end:
-                return current_hour >= silent_start or current_hour < silent_end
+                # Por exemplo: 21h às 7h
+                is_silent = current_hour >= silent_start or current_hour < silent_end
             else:
-                return silent_start <= current_hour < silent_end
+                # Por exemplo: 7h às 21h
+                is_silent = silent_start <= current_hour < silent_end
+            
+            if is_silent:
+                logger.info(f"Em horário silencioso: {current_hour}h está entre {silent_start}h e {silent_end}h")
+            
+            return is_silent
                 
         except Exception as e:
             logger.error(f"Erro ao verificar horário silencioso: {e}")
@@ -361,6 +400,11 @@ _Preço próximo ao seu ponto de equilíbrio!_
     async def _send_morning_summary(self):
         """Envia resumo matinal às 8:00"""
         try:
+            # Verifica horário silencioso primeiro
+            if await self._is_silent_hours(config.USER_CHAT_ID):
+                logger.info("Resumo matinal cancelado - horário silencioso")
+                return
+                
             async with self.market as collector:
                 market_data = await collector.get_market_summary()
                 price_data = market_data['price']
@@ -387,25 +431,26 @@ _Preço próximo ao seu ponto de equilíbrio!_
                     day_emoji = "🔻"
                     day_mood = "BEARISH"
                 
+                # Usa HTML ao invés de Markdown - MUITO mais simples!
                 message = f"""
-☀️ *BOM DIA! RESUMO DO BITCOIN*
+☀️ <b>BOM DIA! RESUMO DO BITCOIN</b>
 {datetime.now().strftime('%d/%m/%Y - %H:%M')}
 
-{day_emoji} *Mercado {day_mood}*
+{day_emoji} <b>Mercado {day_mood}</b>
 
-💰 *PREÇO ATUAL:*
-• USD: {config.USD_FORMAT.format(price_data['usd'])}
-• BRL: {config.BRL_FORMAT.format(price_data['brl'])}
+💰 <b>PREÇO ATUAL:</b>
+• USD: ${price_data['usd']:,.2f}
+• BRL: R$ {price_data['brl']:,.2f}
 • 24h: {price_data['change_24h']:+.2f}%
 
-📊 *INDICADORES:*
-• Fear & Greed: {fear_greed['value']} ({fear_greed['classification']})
+📊 <b>INDICADORES:</b>
+• Fear &amp; Greed: {fear_greed['value']} ({fear_greed['classification']})
 • RSI: {rsi:.1f}
 • Volume 24h: ${price_data['volume_24h']/1e9:.1f}B
 
-💼 *SUA POSIÇÃO:*
-• Valor: {config.USD_FORMAT.format(user_value)}
-• P&L: {config.USD_FORMAT.format(pnl)} ({pnl_percent:+.1f}%)
+💼 <b>SUA POSIÇÃO:</b>
+• Valor: ${user_value:,.2f}
+• P&amp;L: ${pnl:,.2f} ({pnl_percent:+.1f}%)
 • Dist. Breakeven: {((price_data['usd']/config.USER_AVG_PRICE)-1)*100:+.1f}%
 
 📱 Comandos: /price | /market | /alert_add
@@ -416,8 +461,10 @@ Tenha um ótimo dia de trading! 🎯
                 await self.bot.send_message(
                     chat_id=config.USER_CHAT_ID,
                     text=message,
-                    parse_mode=ParseMode.MARKDOWN
+                    parse_mode=ParseMode.HTML
                 )
+                
+                logger.info("Resumo matinal enviado com sucesso")
                 
         except Exception as e:
             logger.error(f"Erro ao enviar resumo matinal: {e}")
@@ -425,6 +472,11 @@ Tenha um ótimo dia de trading! 🎯
     async def _send_evening_summary(self):
         """Envia resumo noturno às 20:00"""
         try:
+            # Verifica horário silencioso primeiro
+            if await self._is_silent_hours(config.USER_CHAT_ID):
+                logger.info("Resumo noturno cancelado - horário silencioso")
+                return
+                
             async with self.market as collector:
                 market_data = await collector.get_market_summary()
                 price_data = market_data['price']
@@ -449,36 +501,39 @@ Tenha um ótimo dia de trading! 🎯
                     dist_percent = ((nearest_alert['value'] - price_data['usd']) / price_data['usd']) * 100
                     alerts_text += f"\nMais próximo: ${nearest_alert['value']:,.0f} ({dist_percent:+.1f}%)"
                 
+                # Usa HTML
                 message = f"""
-🌙 *RESUMO NOTURNO BITCOIN*
+🌙 <b>RESUMO NOTURNO BITCOIN</b>
 {datetime.now().strftime('%d/%m/%Y - %H:%M')}
 
-📊 *PERFORMANCE DO DIA:*
+📊 <b>PERFORMANCE DO DIA:</b>
 • Tendência: {trend}
 • Máxima: ${day_high:,.2f}
 • Mínima: ${day_low:,.2f}
 • Atual: ${price_data['usd']:,.2f}
 
-💡 *ANÁLISE:*
+💡 <b>ANÁLISE:</b>
 • {trend_detail}
 • Volume: {'Alto' if price_data['volume_24h'] > 30e9 else 'Normal'}
 • Volatilidade: {abs(price_data['change_24h']):.1f}%
 
 {alerts_text}
 
-🎯 *Preços-Chave:*
+🎯 <b>Preços-Chave:</b>
 • Resistência: ${price_data['usd']*1.05:,.0f}
 • Suporte: ${price_data['usd']*0.95:,.0f}
 • Seu Breakeven: ${config.USER_AVG_PRICE:,.0f}
 
-_Boa noite e bons trades amanhã!_ 🌟
+<i>Boa noite e bons trades amanhã!</i> 🌟
                 """.strip()
                 
                 await self.bot.send_message(
                     chat_id=config.USER_CHAT_ID,
                     text=message,
-                    parse_mode=ParseMode.MARKDOWN
+                    parse_mode=ParseMode.HTML
                 )
+                
+                logger.info("Resumo noturno enviado com sucesso")
                 
         except Exception as e:
             logger.error(f"Erro ao enviar resumo noturno: {e}")
@@ -486,6 +541,11 @@ _Boa noite e bons trades amanhã!_ 🌟
     async def _send_daily_close_summary(self):
         """Envia resumo de fechamento às 23:59"""
         try:
+            # Verifica horário silencioso primeiro
+            if await self._is_silent_hours(config.USER_CHAT_ID):
+                logger.info("Resumo de fechamento cancelado - horário silencioso")
+                return
+                
             async with self.market as collector:
                 market_data = await collector.get_market_summary()
                 price_data = market_data['price']
@@ -503,31 +563,34 @@ _Boa noite e bons trades amanhã!_ 🌟
                 else:
                     sentiment = "😱 Medo Extremo - Possível Fundo"
                 
+                # Usa HTML
                 message = f"""
-📊 *FECHAMENTO DIÁRIO*
+📊 <b>FECHAMENTO DIÁRIO</b>
 {datetime.now().strftime('%d/%m/%Y')}
 
-💰 *FECHOU EM:*
+💰 <b>FECHOU EM:</b>
 • ${price_data['usd']:,.2f}
 • R$ {price_data['brl']:,.2f}
 • Variação: {price_data['change_24h']:+.2f}%
 
-📈 *SENTIMENTO:*
+📈 <b>SENTIMENTO:</b>
 {sentiment}
-Fear & Greed: {fear_greed['value']}/100
+Fear &amp; Greed: {fear_greed['value']}/100
 
-💡 *RESUMO:*
+💡 <b>RESUMO:</b>
 Bitcoin {'subiu' if price_data['change_24h'] > 0 else 'caiu'} {abs(price_data['change_24h']):.2f}% hoje.
 Volume: ${price_data['volume_24h']/1e9:.1f}B
 
-_Fechamento registrado às 23:59_
+<i>Fechamento registrado às 23:59</i>
                 """.strip()
                 
                 await self.bot.send_message(
                     chat_id=config.USER_CHAT_ID,
                     text=message,
-                    parse_mode=ParseMode.MARKDOWN
+                    parse_mode=ParseMode.HTML
                 )
+                
+                logger.info("Fechamento diário enviado com sucesso")
                 
         except Exception as e:
             logger.error(f"Erro ao enviar fechamento diário: {e}")

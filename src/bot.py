@@ -378,14 +378,14 @@ Use `/alert_list` para ver todos os alertas.
                 )
                 return
             
-            message = "🔔 *SEUS ALERTAS ATIVOS*\n\n"
+            message = "🔔 <b>SEUS ALERTAS ATIVOS</b>\n\n"
             
             for alert in alerts:
                 symbol = "$" if alert['currency'] == "USD" else "R$"
                 status_emoji = "🟢" if alert['retry_count'] == 0 else "🔄"
                 
                 message += f"""
-{status_emoji} *Alerta #{alert['id']}*
+{status_emoji} <b>Alerta #{alert['id']}</b>
 • Tipo: {alert['type'].title()}
 • Valor: {symbol}{alert['value']:,.2f}
 • Condição: {alert['comparison']}
@@ -394,9 +394,9 @@ Use `/alert_list` para ver todos os alertas.
 
 """
             
-            message += "_Use `/alert_del [id]` para deletar_"
+            message += "Use <code>/alert_del [id]</code> para deletar"
             
-            await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(message, parse_mode=ParseMode.HTML)
             
         except Exception as e:
             logger.error(f"Erro ao listar alertas: {e}")
